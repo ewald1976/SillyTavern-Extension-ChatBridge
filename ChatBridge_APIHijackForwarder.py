@@ -57,6 +57,9 @@ class ChatBridgeForwarder:
         self.ws_clients = set()
         self.key_rotator = APIKeyRotator(self.settings["llm_api"]["api_keys"])
         self.response_futures = {}
+        self.session_history: List[
+            Dict[str, str]
+        ] = []  # Accumulated chat history for /v1/message
 
     async def start(self):
         # Start WebSocket server
@@ -82,6 +85,9 @@ class ChatBridgeForwarder:
         # Create User API server (external apps connect here)
         user_app = web.Application()
         user_app.router.add_post("/v1/chat/completions", self.handle_user_api)
+        user_app.router.add_post("/v1/message", self.handle_message)
+        user_app.router.add_post("/v1/message/reset", self.handle_message_reset)
+        user_app.router.add_get("/v1/chat", self.handle_get_chat)
         user_runner = web.AppRunner(user_app)
         await user_runner.setup()
         user_site = web.TCPSite(
@@ -249,6 +255,123 @@ class ChatBridgeForwarder:
         except Exception as e:
             logger.error(f"Failed to handle user API request: {str(e)}", exc_info=True)
             return web.Response(status=500, text=f"Internal Server Error: {str(e)}")
+
+    async def handle_message(self, request: web.Request) -> web.Response:
+        """
+        Simple text-in / text-out endpoint with session accumulation.
+        POST /v1/message
+        Body: { "message": "your text" }
+        Returns: { "reply": "assistant response" }
+        """
+        if (
+            request.headers.get("Authorization")
+            != f"Bearer {self.settings['user_api']['api_key']}"
+        ):
+            return web.Response(status=401)
+
+        try:
+            body = await request.json()
+            user_text = body.get("message", "").strip()
+            if not user_text:
+                return web.Response(status=400, text="Field 'message' is required")
+
+            # Append user message to session history
+            self.session_history.append({"role": "user", "content": user_text})
+            logger.info(
+                f"POST /v1/message — history length: {len(self.session_history)}"
+            )
+
+            # Build OpenAI-format payload from accumulated history
+            request_data = {
+                "model": "default",
+                "stream": False,
+                "messages": self.session_history.copy(),
+            }
+
+            # Reuse existing pipeline
+            request_id = str(uuid.uuid4())
+            future = asyncio.Future()
+            self.response_futures[request_id] = future
+
+            ws_message = {
+                "type": "user_request",
+                "id": request_id,
+                "content": request_data,
+            }
+
+            if not self.ws_clients:
+                self.session_history.pop()  # Roll back on failure
+                return web.Response(status=503, text="No WebSocket clients connected")
+
+            for ws in self.ws_clients:
+                try:
+                    await ws.send(json.dumps(ws_message))
+                    logger.info(
+                        f"Message request forwarded to WebSocket: ID={request_id}"
+                    )
+                    break
+                except Exception as e:
+                    logger.error(f"Failed to send WebSocket message: {e}")
+                    continue
+
+            try:
+                response = await asyncio.wait_for(future, timeout=60.0)
+
+                # Extract plain text reply from OpenAI-format response
+                reply = ""
+                try:
+                    reply = response["choices"][0]["message"]["content"]
+                except (KeyError, IndexError, TypeError):
+                    logger.warning(f"Unexpected response structure: {response}")
+                    reply = str(response)
+
+                # Append assistant reply to session history
+                self.session_history.append({"role": "assistant", "content": reply})
+                logger.info(
+                    f"Session history now has {len(self.session_history)} messages"
+                )
+
+                return web.json_response({"reply": reply})
+
+            finally:
+                self.response_futures.pop(request_id, None)
+
+        except Exception as e:
+            logger.error(f"Failed to handle /v1/message: {str(e)}", exc_info=True)
+            return web.Response(status=500, text=f"Internal Server Error: {str(e)}")
+
+    async def handle_message_reset(self, request: web.Request) -> web.Response:
+        """
+        Clears the accumulated session history.
+        POST /v1/message/reset
+        Returns: { "status": "ok", "cleared": <n> }
+        """
+        if (
+            request.headers.get("Authorization")
+            != f"Bearer {self.settings['user_api']['api_key']}"
+        ):
+            return web.Response(status=401)
+
+        cleared = len(self.session_history)
+        self.session_history.clear()
+        logger.info(f"Session history cleared ({cleared} messages removed)")
+        return web.json_response({"status": "ok", "cleared": cleared})
+
+    async def handle_get_chat(self, request: web.Request) -> web.Response:
+        """
+        Returns the current session history.
+        GET /v1/chat
+        Returns: { "messages": [...], "count": <n> }
+        """
+        if (
+            request.headers.get("Authorization")
+            != f"Bearer {self.settings['user_api']['api_key']}"
+        ):
+            return web.Response(status=401)
+
+        return web.json_response(
+            {"messages": self.session_history, "count": len(self.session_history)}
+        )
 
     async def handle_models(self, request: web.Request) -> web.Response:
         """Handle model list requests - forwards to configured LLM API."""
