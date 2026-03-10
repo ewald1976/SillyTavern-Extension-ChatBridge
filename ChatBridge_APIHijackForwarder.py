@@ -59,6 +59,7 @@ class ChatBridgeForwarder:
         self.response_futures = {}
         self.session_history: List[Dict[str, str]] = []  # Accumulated chat history for /v1/message
         self.default_character: str = self.settings.get("default_character", "")
+        self.use_stream: bool = self.settings.get("stream", False)
 
     async def start(self):
         # Start WebSocket server
@@ -264,7 +265,7 @@ class ChatBridgeForwarder:
             try:
                 await ws.send(json.dumps(ws_message))
                 logger.info(f"Sent select_character: {name}")
-                await asyncio.sleep(0.5)  # Give ST time to switch character
+                await asyncio.sleep(1.0)  # Give ST time to switch character
                 return True
             except Exception as e:
                 logger.error(f"Failed to send select_character: {e}")
@@ -289,10 +290,6 @@ class ChatBridgeForwarder:
             if not user_text:
                 return web.Response(status=400, text="Field 'message' is required")
 
-            # Select default character on first message in a fresh session
-            if not self.session_history and self.default_character:
-                await self.select_character(self.default_character)
-
             # Append user message to session history
             self.session_history.append({"role": "user", "content": user_text})
             logger.info(
@@ -302,15 +299,11 @@ class ChatBridgeForwarder:
             # Build OpenAI-format payload from accumulated history
             request_data = {
                 "model": "default",
-                "stream": False,
+                "stream": self.use_stream,
                 "messages": self.session_history.copy(),
             }
 
-            # Reuse existing pipeline
             request_id = str(uuid.uuid4())
-            future = asyncio.Future()
-            self.response_futures[request_id] = future
-
             ws_message = {
                 "type": "user_request",
                 "id": request_id,
@@ -321,38 +314,78 @@ class ChatBridgeForwarder:
                 self.session_history.pop()  # Roll back on failure
                 return web.Response(status=503, text="No WebSocket clients connected")
 
-            for ws in self.ws_clients:
+            if self.use_stream:
+                # Streaming path: collect all chunks, reassemble full reply
+                queue = asyncio.Queue()
+                self.response_futures[request_id] = queue
                 try:
-                    await ws.send(json.dumps(ws_message))
-                    logger.info(
-                        f"Message request forwarded to WebSocket: ID={request_id}"
-                    )
-                    break
-                except Exception as e:
-                    logger.error(f"Failed to send WebSocket message: {e}")
-                    continue
+                    for ws in self.ws_clients:
+                        try:
+                            await ws.send(json.dumps(ws_message))
+                            logger.info(f"Message request forwarded to WebSocket: ID={request_id}")
+                            break
+                        except Exception as e:
+                            logger.error(f"Failed to send WebSocket message: {e}")
+                            continue
 
-            try:
-                response = await asyncio.wait_for(future, timeout=60.0)
+                    # Collect streaming chunks into full reply
+                    full_reply = ""
+                    while True:
+                        try:
+                            chunk = await asyncio.wait_for(queue.get(), timeout=60.0)
+                            if chunk == "[DONE]":
+                                break
+                            # Parse SSE chunk: data: {json}
+                            for line in chunk.splitlines():
+                                line = line.strip()
+                                if line.startswith("data: ") and line != "data: [DONE]":
+                                    try:
+                                        payload = json.loads(line[6:])
+                                        delta = payload["choices"][0]["delta"].get("content", "")
+                                        if delta:
+                                            full_reply += delta
+                                    except (json.JSONDecodeError, KeyError, IndexError):
+                                        pass
+                        except asyncio.TimeoutError:
+                            logger.warning(f"Timeout waiting for stream chunk: ID={request_id}")
+                            break
 
-                # Extract plain text reply from OpenAI-format response
-                reply = ""
+                    self.session_history.append({"role": "assistant", "content": full_reply})
+                    logger.info(f"Session history now has {len(self.session_history)} messages")
+                    return web.json_response({"reply": full_reply})
+
+                finally:
+                    self.response_futures.pop(request_id, None)
+
+            else:
+                # Non-streaming path
+                future = asyncio.Future()
+                self.response_futures[request_id] = future
                 try:
-                    reply = response["choices"][0]["message"]["content"]
-                except (KeyError, IndexError, TypeError):
-                    logger.warning(f"Unexpected response structure: {response}")
-                    reply = str(response)
+                    for ws in self.ws_clients:
+                        try:
+                            await ws.send(json.dumps(ws_message))
+                            logger.info(f"Message request forwarded to WebSocket: ID={request_id}")
+                            break
+                        except Exception as e:
+                            logger.error(f"Failed to send WebSocket message: {e}")
+                            continue
 
-                # Append assistant reply to session history
-                self.session_history.append({"role": "assistant", "content": reply})
-                logger.info(
-                    f"Session history now has {len(self.session_history)} messages"
-                )
+                    response = await asyncio.wait_for(future, timeout=60.0)
 
-                return web.json_response({"reply": reply})
+                    reply = ""
+                    try:
+                        reply = response["choices"][0]["message"]["content"]
+                    except (KeyError, IndexError, TypeError):
+                        logger.warning(f"Unexpected response structure: {response}")
+                        reply = str(response)
 
-            finally:
-                self.response_futures.pop(request_id, None)
+                    self.session_history.append({"role": "assistant", "content": reply})
+                    logger.info(f"Session history now has {len(self.session_history)} messages")
+                    return web.json_response({"reply": reply})
+
+                finally:
+                    self.response_futures.pop(request_id, None)
 
         except Exception as e:
             logger.error(f"Failed to handle /v1/message: {str(e)}", exc_info=True)
