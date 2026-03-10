@@ -79,19 +79,23 @@ function setupWebSocket() {
       if (data.type === "select_character") {
         const name = data.name;
         updateDebugLog(`Selecting character: ${name}`);
-        // Find and click the character in ST's character list
-        const charItems = $("#character_select option, .character_select_item");
-        let found = false;
-        charItems.each(function () {
-          if ($(this).text().trim().toLowerCase() === name.toLowerCase()) {
-            $(this).prop("selected", true).trigger("change");
-            found = true;
-            updateDebugLog(`Character selected: ${name}`);
-            return false; // break
+        const context = getContext();
+        // Search characters array for matching name
+        const characters = context.characters;
+        if (!characters || characters.length === 0) {
+          updateDebugLog(`No characters loaded`);
+        } else {
+          const idx = characters.findIndex(
+            (c) => c.name.trim().toLowerCase() === name.trim().toLowerCase()
+          );
+          if (idx !== -1) {
+            // Use ST's selectCharacterById with the array index
+            await context.selectCharacterById(String(idx));
+            updateDebugLog(`Character selected: ${name} (index ${idx})`);
+          } else {
+            updateDebugLog(`Character not found: ${name}`);
+            updateDebugLog(`Available: ${characters.map((c) => c.name).join(", ")}`);
           }
-        });
-        if (!found) {
-          updateDebugLog(`Character not found: ${name}`);
         }
       } else if (data.type === "user_request") {
         updateDebugLog("Received user request");
