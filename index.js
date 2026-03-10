@@ -76,7 +76,24 @@ function setupWebSocket() {
       const data = JSON.parse(event.data);
       updateDebugLog(`Received message: ${JSON.stringify(data)}`);
 
-      if (data.type === "user_request") {
+      if (data.type === "select_character") {
+        const name = data.name;
+        updateDebugLog(`Selecting character: ${name}`);
+        // Find and click the character in ST's character list
+        const charItems = $("#character_select option, .character_select_item");
+        let found = false;
+        charItems.each(function () {
+          if ($(this).text().trim().toLowerCase() === name.toLowerCase()) {
+            $(this).prop("selected", true).trigger("change");
+            found = true;
+            updateDebugLog(`Character selected: ${name}`);
+            return false; // break
+          }
+        });
+        if (!found) {
+          updateDebugLog(`Character not found: ${name}`);
+        }
+      } else if (data.type === "user_request") {
         updateDebugLog("Received user request");
         if (data.content?.messages) {
           const context = getContext();

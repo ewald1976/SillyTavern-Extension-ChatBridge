@@ -19,5 +19,6 @@
         "host": "localhost",
         "port": 8003,
         "api_key": "user-api-key"
-    }
+    },
+    "default_character": ""
 }

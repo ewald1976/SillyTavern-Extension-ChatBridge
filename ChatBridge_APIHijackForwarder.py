@@ -57,9 +57,8 @@ class ChatBridgeForwarder:
         self.ws_clients = set()
         self.key_rotator = APIKeyRotator(self.settings["llm_api"]["api_keys"])
         self.response_futures = {}
-        self.session_history: List[
-            Dict[str, str]
-        ] = []  # Accumulated chat history for /v1/message
+        self.session_history: List[Dict[str, str]] = []  # Accumulated chat history for /v1/message
+        self.default_character: str = self.settings.get("default_character", "")
 
     async def start(self):
         # Start WebSocket server
@@ -256,6 +255,21 @@ class ChatBridgeForwarder:
             logger.error(f"Failed to handle user API request: {str(e)}", exc_info=True)
             return web.Response(status=500, text=f"Internal Server Error: {str(e)}")
 
+    async def select_character(self, name: str) -> bool:
+        """Send a select_character message to the ST extension via WebSocket."""
+        if not name or not self.ws_clients:
+            return False
+        ws_message = {"type": "select_character", "name": name}
+        for ws in self.ws_clients:
+            try:
+                await ws.send(json.dumps(ws_message))
+                logger.info(f"Sent select_character: {name}")
+                await asyncio.sleep(0.5)  # Give ST time to switch character
+                return True
+            except Exception as e:
+                logger.error(f"Failed to send select_character: {e}")
+        return False
+
     async def handle_message(self, request: web.Request) -> web.Response:
         """
         Simple text-in / text-out endpoint with session accumulation.
@@ -274,6 +288,10 @@ class ChatBridgeForwarder:
             user_text = body.get("message", "").strip()
             if not user_text:
                 return web.Response(status=400, text="Field 'message' is required")
+
+            # Select default character on first message in a fresh session
+            if not self.session_history and self.default_character:
+                await self.select_character(self.default_character)
 
             # Append user message to session history
             self.session_history.append({"role": "user", "content": user_text})
@@ -355,6 +373,11 @@ class ChatBridgeForwarder:
         cleared = len(self.session_history)
         self.session_history.clear()
         logger.info(f"Session history cleared ({cleared} messages removed)")
+
+        # Re-select default character after reset
+        if self.default_character:
+            await self.select_character(self.default_character)
+
         return web.json_response({"status": "ok", "cleared": cleared})
 
     async def handle_get_chat(self, request: web.Request) -> web.Response:
