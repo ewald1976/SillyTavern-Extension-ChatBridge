@@ -40,12 +40,14 @@ function updateWSStatus(connected) {
   }
 }
 
-function convertOpenAIToSTMessage(msg) {
+function convertOpenAIToSTMessage(msg, userName) {
   const isUser = msg.role === "user";
   const currentTime = new Date().toLocaleString();
+  // Use: 1) explicitly passed userName, 2) ST's configured name1, 3) fallback 'user'
+  const resolvedUserName = userName || getContext().name1 || "user";
 
   return {
-    name: isUser ? "user" : "Assistant",
+    name: isUser ? resolvedUserName : "Assistant",
     is_user: isUser,
     is_system: false,
     send_date: currentTime,
@@ -106,9 +108,11 @@ function setupWebSocket() {
             content: data.content,
           };
           const context = getContext();
+          // Use user name from request if provided, else fall back to ST's name1
+          const userName = data.content.user || context.name1 || "user";
           const newChat = data.content.messages
             .filter((msg) => msg.role === "user" || msg.role === "assistant")
-            .map((msg) => convertOpenAIToSTMessage(msg));
+            .map((msg) => convertOpenAIToSTMessage(msg, userName));
 
           chat.splice(0, chat.length, ...newChat);
           context.clearChat();

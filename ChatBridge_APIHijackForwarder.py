@@ -290,6 +290,9 @@ class ChatBridgeForwarder:
             if not user_text:
                 return web.Response(status=400, text="Field 'message' is required")
 
+            # Optional user name: request field > settings default > empty (ST will use name1)
+            user_name = body.get("user", self.settings.get("default_user", ""))
+
             # Append user message to session history
             self.session_history.append({"role": "user", "content": user_text})
             logger.info(
@@ -301,6 +304,7 @@ class ChatBridgeForwarder:
                 "model": "default",
                 "stream": self.use_stream,
                 "messages": self.session_history.copy(),
+                "user": user_name,  # forwarded to ST extension for persona display
             }
 
             request_id = str(uuid.uuid4())
@@ -403,6 +407,12 @@ class ChatBridgeForwarder:
         ):
             return web.Response(status=401)
 
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            pass  # Body is optional on reset
+
         cleared = len(self.session_history)
         self.session_history.clear()
         logger.info(f"Session history cleared ({cleared} messages removed)")
@@ -411,7 +421,9 @@ class ChatBridgeForwarder:
         if self.default_character:
             await self.select_character(self.default_character)
 
-        return web.json_response({"status": "ok", "cleared": cleared})
+        # Echo back which user persona is active (from request or settings default)
+        active_user = body.get("user", self.settings.get("default_user", ""))
+        return web.json_response({"status": "ok", "cleared": cleared, "user": active_user})
 
     async def handle_get_chat(self, request: web.Request) -> web.Response:
         """

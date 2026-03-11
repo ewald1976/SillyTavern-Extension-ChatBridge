@@ -21,5 +21,6 @@
         "api_key": "user-api-key"
     },
     "default_character": "",
+    "default_user": "",
     "stream": false
 }
