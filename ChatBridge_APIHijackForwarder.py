@@ -452,123 +452,33 @@ class ChatBridgeForwarder:
 
     async def handle_chat_completions(self, request: web.Request) -> web.Response:
         """
-        Intercepts ST's outgoing chat completion requests.
-        Forwards to LLM API and simultaneously returns response to waiting user requests.
+        Simple proxy for ST's outgoing LLM requests.
+        Response routing back to the caller is handled via the WebSocket
+        MutationObserver loop in the ST browser extension (st_response message).
         """
         try:
             request_data = await request.json()
-            is_stream = request_data.get("stream", False)
-            logger.info(
-                f"Received chat completion request: PATH={request.path}, STREAM={is_stream}"
-            )
-
-            # Find active user requests waiting for a response
-            active_user_futures = {
-                rid: future
-                for rid, future in self.response_futures.items()
-                if not getattr(future, "done", lambda: True)()
-            }
-
-            if active_user_futures:
-                logger.info(f"Found {len(active_user_futures)} active user request(s)")
-            else:
-                logger.warning("No active user requests found")
-
             api_key = self.key_rotator.get_next_key()
             headers = {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             }
             target_url = f"{self.settings['llm_api']['base_url']}/chat/completions"
+            logger.info(f"Proxying chat completion to: {target_url}")
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     target_url, json=request_data, headers=headers
                 ) as llm_response:
-                    if llm_response.headers.get("content-type") == "text/event-stream":
-                        logger.info("Processing streaming response")
-                        st_response = web.StreamResponse(
-                            status=llm_response.status,
-                            headers={"Content-Type": "text/event-stream"},
-                        )
-                        await st_response.prepare(request)
-
-                        active_user_queues = {
-                            rid: queue
-                            for rid, queue in self.response_futures.items()
-                            if isinstance(queue, asyncio.Queue)
-                        }
-
-                        async for chunk in llm_response.content:
-                            if chunk:
-                                chunk_str = chunk.decode()
-                                logger.debug(f"Received chunk: {chunk_str[:100]}...")
-
-                                # Forward to ST
-                                await st_response.write(chunk)
-
-                                # Forward to user queues simultaneously
-                                if active_user_queues:
-                                    for queue_id, queue in active_user_queues.items():
-                                        try:
-                                            await queue.put(chunk_str)
-                                            logger.debug(
-                                                f"Forwarded chunk to user queue {queue_id}"
-                                            )
-                                        except Exception as e:
-                                            logger.error(
-                                                f"Failed to forward to user queue {queue_id}: {e}"
-                                            )
-
-                        # Send end marker to all user queues
-                        if active_user_queues:
-                            for queue_id, queue in active_user_queues.items():
-                                try:
-                                    await queue.put("[DONE]")
-                                    logger.info(
-                                        f"Sent end marker to user queue {queue_id}"
-                                    )
-                                except Exception as e:
-                                    logger.error(
-                                        f"Failed to send end marker to {queue_id}: {e}"
-                                    )
-
-                        return st_response
-
-                    else:
-                        logger.info("Processing non-streaming response")
-                        response_data = await llm_response.json()
-                        logger.info(
-                            f"Received LLM response: {str(response_data)[:200]}..."
-                        )
-
-                        # Forward to all waiting user requests
-                        futures_updated = False
-                        for request_id, future in list(active_user_futures.items()):
-                            try:
-                                if (
-                                    isinstance(future, asyncio.Future)
-                                    and not future.done()
-                                ):
-                                    future.set_result(response_data)
-                                    logger.info(
-                                        f"Successfully set result for user request: ID={request_id}"
-                                    )
-                                    futures_updated = True
-                            except Exception as e:
-                                logger.error(
-                                    f"Failed to set result for {request_id}: {e}"
-                                )
-
-                        if not futures_updated:
-                            logger.warning("No user request results were updated")
-
-                        return web.json_response(
-                            response_data, status=llm_response.status
-                        )
+                    body = await llm_response.read()
+                    return web.Response(
+                        body=body,
+                        status=llm_response.status,
+                        content_type=llm_response.content_type,
+                    )
 
         except Exception as e:
-            error_msg = f"Failed to handle chat completion request: {str(e)}"
+            error_msg = f"Failed to proxy chat completion: {str(e)}"
             logger.error(error_msg, exc_info=True)
             return web.Response(status=500, text=error_msg)
 

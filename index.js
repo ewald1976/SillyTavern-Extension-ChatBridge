@@ -15,6 +15,7 @@ if (!extension_settings[extensionName]) {
 Object.assign(extension_settings[extensionName], defaultSettings);
 
 let ws;
+let activeBridgeRequest = null;
 
 function updateDebugLog(message) {
   const debugLog = $("#debug_log");
@@ -100,6 +101,10 @@ function setupWebSocket() {
       } else if (data.type === "user_request") {
         updateDebugLog("Received user request");
         if (data.content?.messages) {
+          activeBridgeRequest = {
+            id: data.id,
+            content: data.content,
+          };
           const context = getContext();
           const newChat = data.content.messages
             .filter((msg) => msg.role === "user" || msg.role === "assistant")
@@ -134,6 +139,42 @@ function setupWebSocket() {
     updateWSStatus(false);
     updateDebugLog(`WebSocket error: ${error}`);
   };
+}
+
+function observeNewMessages() {
+  const observer = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      if (mutation.addedNodes.length > 0) {
+        const lastMessage = chat[chat.length - 1];
+        // If there's an active request and the last message is from the assistant, send it back
+        if (activeBridgeRequest && lastMessage && !lastMessage.is_user) {
+          const response = {
+            type: "st_response",
+            id: activeBridgeRequest.id,
+            content: {
+              choices: [{
+                message: {
+                  role: "assistant",
+                  content: lastMessage.mes,
+                },
+              }],
+            },
+          };
+          ws.send(JSON.stringify(response));
+          updateDebugLog(`Response sent for request ${activeBridgeRequest.id}`);
+          activeBridgeRequest = null;
+        }
+      }
+    }
+  });
+
+  const chatElement = document.querySelector("#chat");
+  if (chatElement) {
+    observer.observe(chatElement, { childList: true, subtree: true });
+    updateDebugLog("Message observer initialized");
+  } else {
+    updateDebugLog("Warning: Could not find #chat element");
+  }
 }
 
 function updateConnectionButtons(connected) {
@@ -193,6 +234,7 @@ jQuery(async () => {
   });
 
   setupWebSocket();
+  observeNewMessages();
 
   // Auto-connect checkbox
   $("#ws_auto_connect").prop(
