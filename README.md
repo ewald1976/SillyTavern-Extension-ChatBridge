@@ -1,126 +1,196 @@
-# SillyTavern Extension - ChatBridge 
+# SillyTavern Extension - ChatBridge
 
-一个用于SillyTavern的API桥接扩展，让外部应用（如qq机器人）能够复用SillyTavern的对话功能，像调用api一样在SillyTavern中聊天。
+A SillyTavern browser extension that exposes SillyTavern's conversation engine as a local REST API. External tools (scripts, bots, automation pipelines) can send messages, maintain session history, and receive character responses — all through a simple HTTP interface, without touching SillyTavern's UI directly.
 
-An API bridging extension for SillyTavern that allows external applications to reuse SillyTavern's conversation functionality, enabling chat in SillyTavern as if calling an API.
+Originally forked from [ldc861117/SillyTavern-Extension-ChatBridge](https://github.com/ldc861117/SillyTavern-Extension-ChatBridge), then substantially rewritten and extended.
 
-## 简介 / Introduction
-> *我很高兴地宣布我写完了此项目的主要功能，这是最新的更新，和之前的版本完全不同了，重构了基本功能并且实现了向外部开设Openai格式的api，适用于任何openai应用程序调用SillyTavern的强大功能。*
+---
 
-> *I'm pleased to announce that I have completed the main features of this project. This is the latest update, completely different from previous versions. I've restructured the basic functionality and implemented an OpenAI-format API for external use, suitable for any OpenAI application to leverage SillyTavern's powerful capabilities.*
+## Architecture
 
-本项目是一个SillyTavern扩展，通过WebSocket和API转发的方式，实现了将SillyTavern作为中间件服务的功能。它包含以下组件：
-
-This project is a SillyTavern extension that turns SillyTavern into a middleware service through WebSocket and API forwarding. It consists of the following components:
-
-- SillyTavern UI Extension: 负责与WebSocket服务器通信
-- ChatBridge_APIHijackForwarder.py: 核心服务器组件，提供WebSocket和API接口
-- 配置文件：用于设置各类连接参数
-
-- SillyTavern UI Extension: Responsible for communication with the WebSocket server
-- ChatBridge_APIHijackForwarder.py: Core server component, providing WebSocket and API interfaces
-- Configuration files: Used to set various connection parameters
-
-该扩展可以让任何支持OpenAI API格式的外部应用通过SillyTavern的对话管理系统与LLM进行交互。
-
-This extension allows any external application that supports the OpenAI API format to interact with LLMs through SillyTavern's conversation management system.
-
-## 使用说明 / Usage Instructions
-
-### 1. 安装扩展 / Install the Extension
-
-1. 复制项目文件到SillyTavern扩展目录:
-   Copy the project files to the SillyTavern extension directory:
-```bash
-/public/scripts/extensions/third-party/SillyTavern-Extension-ChatBridge/
+```
+External Tool
+    │
+    │  POST /v1/message  (port 8003)
+    ▼
+ChatBridge Python Server  ──WebSocket (8001)──►  ST Browser Extension
+                                                         │
+                                              SillyTavern processes message
+                                                         │
+                                              MutationObserver detects response
+                                                         │
+                                              st_response via WebSocket
+    ▲                                                    │
+    └────────────────────────────────────────────────────┘
+    { "reply": "..." }
 ```
 
-### 2. 启动服务 / Start the Service
+The extension uses a **MutationObserver** on the `#chat` DOM element to detect when SillyTavern finishes generating a response, then routes it back to the waiting caller via WebSocket. This replaces the original streaming-intercept approach and is significantly more reliable.
 
-0. 你可能需要配置settings.json文件中的各api的base_url和apikey。
+---
 
-   You may need to configure the base_url and apikey for various APIs in the settings.json file.
+## Components
 
-1. 启动Python服务器:
-   Start the Python server:
+| File | Role |
+|---|---|
+| `index.js` | ST browser extension — WebSocket client, chat injection, response observer |
+| `ChatBridge_APIHijackForwarder.py` | Python server — REST endpoints, WebSocket bridge, session management |
+| `settings.json` | Runtime configuration (copy from `settings.json.template`) |
+| `start_forwarder.sh` | Startup script with dependency and port checks (Linux/macOS) |
+| `start_forwarder.command` | macOS double-click launcher |
+
+---
+
+## Installation
+
+### 1. Install the ST extension
+
+Clone or copy this repo into SillyTavern's third-party extensions folder:
+
 ```bash
-python ChatBridge_APIHijackForwarder.py
+cd /path/to/SillyTavern/public/scripts/extensions/third-party/
+git clone https://github.com/ewald1976/SillyTavern-Extension-ChatBridge
 ```
 
-2. 在SillyTavern扩展设置中配置并连接WebSocket:
-   Configure and connect to WebSocket in SillyTavern extension settings:
-- 设置服务器地址(默认localhost)
-- 设置端口(默认8001)
-- 点击"连接"按钮
+### 2. Configure
 
-- Set the server address (default: localhost)
-- Set the port (default: 8001)
-- Click the "Connect" button
+```bash
+cp settings.json.template settings.json
+```
 
-### 3. 外部应用调用 / External Application Calls
+Edit `settings.json`:
 
-配置外部应用的API设置， 如:
-Configure the API settings for external applications, for example:
+```json
+{
+    "websocket":   { "host": "localhost", "port": 8001 },
+    "llm_api":     { "base_url": "http://localhost:1234/v1", "api_keys": [""] },
+    "st_api":      { "host": "localhost", "port": 8002, "api_key": "st-internal-key" },
+    "user_api":    { "host": "localhost", "port": 8003, "api_key": "your-secret-key" },
+    "default_character": "YourCharacterName",
+    "default_user": "",
+    "stream": true
+}
+```
+
+`st_api.port` must match the port ST is configured to use for its built-in API.  
+`stream` must match the streaming setting in SillyTavern's API connection.
+
+### 3. Install Python dependencies
+
+```bash
+pip install aiohttp websockets
+```
+
+Or use the startup script which handles this automatically:
+
+```bash
+bash start_forwarder.sh
+```
+
+### 4. Connect in SillyTavern
+
+Open SillyTavern → Extensions → Chat Bridge. Set host/port to match `websocket` in `settings.json`, click **Connect**.
+
+---
+
+## API Reference
+
+All endpoints require `Authorization: Bearer <user_api.api_key>`.
+
+### `POST /v1/message` — Send a message
+
+Sends a message to SillyTavern, accumulates session history, returns the character's reply.
+
+**Request:**
+```json
+{
+    "message": "What is an MDM system?",
+    "user": "Elmar"
+}
+```
+
+- `message` *(required)* — the user's text
+- `user` *(optional)* — display name shown in ST chat. Priority: request field → `default_user` in settings → ST's configured `name1` → `"user"`
+
+**Response:**
+```json
+{ "reply": "An MDM (Mobile Device Management) system is..." }
+```
+
+---
+
+### `POST /v1/message/reset` — Reset session
+
+Clears the accumulated session history and re-selects the default character.
+
+**Response:**
+```json
+{ "status": "ok", "cleared": 4 }
+```
+
+---
+
+### `GET /v1/chat` — Get session history
+
+Returns the current accumulated message history.
+
+**Response:**
+```json
+{
+    "messages": [
+        { "role": "user", "content": "Hello" },
+        { "role": "assistant", "content": "Hi! How can I help?" }
+    ],
+    "count": 2
+}
+```
+
+---
+
+### `POST /v1/chat/completions` — OpenAI-compatible endpoint
+
+Full OpenAI-format chat completions pass-through. Useful if you want to point an existing OpenAI-compatible tool directly at ChatBridge.
+
 ```python
-client = OpenAI(
-    api_key="your-user-api-key",
-    base_url="http://localhost:8003/v1"
-)
+from openai import OpenAI
+client = OpenAI(api_key="your-secret-key", base_url="http://localhost:8003/v1")
 ```
 
-## 内部逻辑 / Internal Logic
+---
 
-请求流程:
-Request flow:
-1. 外部应用 → 用户API(8003) → WebSocket(8001)
-2. WebSocket → SillyTavern UI Extension
-3. SillyTavern处理 → ST API(8002)
-4. ST API → LLM API → 获取响应
-5. 响应同时返回给ST和用户API
+## Character Selection
 
-1. External App → User API(8003) → WebSocket(8001)
-2. WebSocket → SillyTavern UI Extension
-3. SillyTavern processing → ST API(8002)
-4. ST API → LLM API → Get response
-5. Response returned to both ST and User API
+Set `default_character` in `settings.json` to automatically select a character on startup and after each session reset.
 
-```mermaid
-sequenceDiagram
-    User->>UserAPI: 1.调用API
-    UserAPI->>WebSocket: 2.转发请求
-    WebSocket->>ST: 3.通知处理
-    ST->>STAPI: 4.调用接口
-    STAPI->>LLM: 5.请求响应
-    LLM-->>STAPI: 6.返回结果
-    STAPI-->>ST: 7a.发送响应
-    LLMAPI-->>UserAPI: 7b.同步发送响应
-    UserAPI-->>User: 8.返回结果
-```
+You can also trigger character selection dynamically by sending a WebSocket message from the Python side (used internally by `POST /v1/message/reset`).
 
-### 重要说明 / Important Notes
+---
 
-- 需要SillyTavern最新版本支持`context.clearChat()`和`context.printMessages()`
-- 所有API采用OpenAI格式
-- 支持流式和非流式响应， **但必须保证ST的设置和应用程序的设置都保持流式/非流式一致**
-- 支持多个LLM API密钥轮询
+## Settings Reference
 
-- Requires the latest version of SillyTavern with support for `context.clearChat()` and `context.printMessages()`
-- All APIs use OpenAI format
-- Supports both streaming and non-streaming responses, **but ensure that ST settings and application settings are consistent for streaming/non-streaming**
-- Supports multiple LLM API keys rotation
+| Key | Description |
+|---|---|
+| `websocket.port` | Port for the WebSocket bridge between Python server and ST extension (default: 8001) |
+| `st_api.port` | Port ST uses for its built-in API — Python server proxies LLM calls here (default: 8002) |
+| `user_api.port` | Port external tools connect to (default: 8003) |
+| `user_api.api_key` | Bearer token required for all `/v1/*` endpoints |
+| `llm_api.base_url` | Base URL of the LLM backend (LM Studio, Ollama, etc.) |
+| `llm_api.api_keys` | One or more API keys, rotated round-robin |
+| `default_character` | Character name to auto-select on start and after reset |
+| `default_user` | Fallback display name for the user in ST chat |
+| `stream` | Must match ST's streaming setting (`true`/`false`) |
 
-## 依赖要求 / Dependencies
+---
 
-- Python 3.7+
-- SillyTavern最新版本 / Latest version of SillyTavern
-- aiohttp
-- websockets
+## Dependencies
 
-## 许可证 / License
+- Python 3.8+
+- SillyTavern (latest)
+- `aiohttp`
+- `websockets`
 
-本项目采用AGPL-3.0许可证
-This project is licensed under AGPL-3.0
+---
 
-## 已知问题
+## License
 
-- 若对UserApi的请求在上一条信息响应未完全结束时，发送另一条请求，有大概率会得到相同的回复。即转发器设计bug使得UserApi对短时间的请求将会给出相同的复制的响应，将在未来的版本修复，此Bug不影响单机串行使用。
+AGPL-3.0 — see [LICENSE](LICENSE)
