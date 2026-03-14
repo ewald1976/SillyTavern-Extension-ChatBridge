@@ -105,7 +105,7 @@ Sends a message to SillyTavern, accumulates session history, returns the charact
 ```json
 {
     "message": "What is an MDM system?",
-    "user": "Elmar"
+    "user": "NAME"
 }
 ```
 
